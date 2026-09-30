@@ -6778,5 +6778,249 @@ Hãy trả về định dạng JSON thuần túy theo mảng các chuỗi bài v
             showToast('Đã xóa mẫu câu!', 'info');
         }
     </script>
+<!-- ===== GITHUB SYNC (tự lưu & đồng bộ dữ liệu giữa các máy) ===== -->
+<button id="ghs-btn" type="button" class="fixed bottom-4 left-4 z-[60] flex items-center gap-2 px-3 py-2 rounded-full bg-slate-900/95 border border-slate-700 text-xs font-bold text-slate-200 shadow-2xl hover:border-blue-500">
+    <span id="ghs-dot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+    <i class="fa-brands fa-github"></i><span id="ghs-label">GitHub Sync</span>
+</button>
+<div id="ghs-modal" style="display:none" class="fixed inset-0 z-[70] bg-slate-950/80 backdrop-blur-md items-center justify-center p-4">
+    <div class="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-2xl bg-slate-900 border border-slate-700 p-5 text-slate-200 text-xs space-y-3">
+        <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold"><i class="fa-brands fa-github mr-2"></i>Đồng bộ dữ liệu qua GitHub</h3>
+            <button id="ghs-close" type="button" class="text-slate-400 hover:text-white text-base">✕</button>
+        </div>
+        <p id="ghs-status-text" class="text-slate-400">Chưa kết nối.</p>
+        <div class="grid grid-cols-2 gap-2">
+            <label class="space-y-1"><span>Tài khoản GitHub</span><input id="ghs-owner" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 outline-none focus:border-blue-500" placeholder="vd: tenban"></label>
+            <label class="space-y-1"><span>Repo dữ liệu (private)</span><input id="ghs-repo" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 outline-none focus:border-blue-500" placeholder="vd: app-data"></label>
+            <label class="space-y-1"><span>Branch</span><input id="ghs-branch" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 outline-none focus:border-blue-500" placeholder="main"></label>
+            <label class="space-y-1"><span>Tên file</span><input id="ghs-path" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 outline-none focus:border-blue-500" placeholder="fcc-data.json"></label>
+        </div>
+        <label class="block space-y-1"><span>GitHub Token (fine-grained, quyền Contents: Read and write)</span>
+            <input id="ghs-token" type="password" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 outline-none focus:border-blue-500" placeholder="github_pat_..."></label>
+        <label class="flex items-center gap-2"><input id="ghs-notoken" type="checkbox"> <span>Không đẩy token Fanpage lên GitHub (an toàn hơn, nhưng mỗi máy phải tự nhập token Fanpage)</span></label>
+        <div class="grid grid-cols-2 gap-2 pt-1">
+            <button id="ghs-connect" type="button" class="col-span-2 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 font-bold text-white">Lưu &amp; kết nối</button>
+            <button id="ghs-pull" type="button" class="py-2 rounded-lg bg-slate-800 hover:bg-slate-700 font-bold">⬇ Tải về từ GitHub</button>
+            <button id="ghs-push" type="button" class="py-2 rounded-lg bg-slate-800 hover:bg-slate-700 font-bold">⬆ Đẩy lên ngay</button>
+            <button id="ghs-off" type="button" class="col-span-2 py-2 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 font-bold">Ngắt kết nối máy này</button>
+        </div>
+        <p class="text-[11px] text-slate-500 leading-relaxed">Cấu hình &amp; token chỉ lưu trong trình duyệt của máy này, mỗi máy nhập một lần. Chỉ đồng bộ dữ liệu văn bản (Fanpage, thư viện bài, hàng đợi, thư mục, mẫu bình luận, lịch sử follower). File ảnh/video chọn từ ổ đĩa (IndexedDB) không được đồng bộ.</p>
+    </div>
+</div>
+<script>
+(function () {
+    'use strict';
+    const KEYS = ['fb_tracked_pages_v12','fb_scheduled_queue_v12','fb_library_folders_v12','fb_post_library_v12','fb_follower_history_v12','fb_comment_templates_v12'];
+    const CFG_KEY = 'ghs_config_v1', META_KEY = 'ghs_meta_v1';
+    const $ = id => document.getElementById(id);
+    const toast = (m, t) => { try { showToast(m, t || 'info'); } catch (e) { console.log(m); } };
+    const loadJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } };
+
+    let cfg = Object.assign({ owner: '', repo: '', branch: 'main', path: 'fcc-data.json', token: '', excludeTokens: false }, loadJSON(CFG_KEY, {}));
+    let meta = Object.assign({ sha: null, dirty: false, lastHash: '' }, loadJSON(META_KEY, {}));
+    let pushTimer = null, busy = false;
+
+    const saveMeta = () => localStorage.setItem(META_KEY, JSON.stringify(meta));
+    const configured = () => !!(cfg.owner && cfg.repo && cfg.token);
+    const apiUrl = () => `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${cfg.path.split('/').map(encodeURIComponent).join('/')}`;
+    const hdr = extra => Object.assign({ Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, extra || {});
+
+    function toB64(str) {
+        const bytes = new TextEncoder().encode(str); let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(bin);
+    }
+    function fromB64(b64) {
+        const bin = atob(b64.replace(/\n/g, ''));
+        return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+    }
+    function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return String(h) + ':' + s.length; }
+
+    function snapshot() {
+        const data = {};
+        KEYS.forEach(k => { const v = localStorage.getItem(k); if (v !== null) { try { data[k] = JSON.parse(v); } catch (e) {} } });
+        if (cfg.excludeTokens && Array.isArray(data.fb_tracked_pages_v12)) {
+            data.fb_tracked_pages_v12 = data.fb_tracked_pages_v12.map(p => { const c = Object.assign({}, p); delete c.token; return c; });
+        }
+        return data;
+    }
+    function hasLocalData() {
+        return KEYS.some(k => { const v = localStorage.getItem(k); return v && v !== '[]' && v !== '{}'; });
+    }
+
+    const STATUS = {
+        off:    ['bg-slate-500', 'GitHub Sync', 'Chưa kết nối.'],
+        ok:     ['bg-emerald-500', 'Đã đồng bộ', 'Dữ liệu đã khớp với GitHub.'],
+        sync:   ['bg-blue-500 animate-pulse', 'Đang đồng bộ…', 'Đang trao đổi dữ liệu với GitHub…'],
+        dirty:  ['bg-amber-500', 'Chờ lưu…', 'Có thay đổi, sẽ tự lưu lên GitHub sau vài giây.'],
+        behind: ['bg-orange-500', 'Có bản mới', 'GitHub có dữ liệu mới hơn từ máy khác. Bấm "Tải về từ GitHub".'],
+        err:    ['bg-red-500', 'Lỗi đồng bộ', 'Đồng bộ lỗi.']
+    };
+    function setStatus(state, msg) {
+        const s = STATUS[configured() ? state : 'off'];
+        $('ghs-dot').className = 'w-2.5 h-2.5 rounded-full ' + s[0];
+        $('ghs-label').textContent = s[1];
+        $('ghs-status-text').textContent = msg || s[2];
+    }
+
+    async function fetchRemote() {
+        const r = await fetch(apiUrl() + '?ref=' + encodeURIComponent(cfg.branch) + '&t=' + Date.now(), { headers: hdr(), cache: 'no-store' });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error('GitHub ' + r.status + (r.status === 401 ? ' (token sai/hết hạn)' : r.status === 403 ? ' (thiếu quyền hoặc bị giới hạn)' : ''));
+        const j = await r.json();
+        let text;
+        if (j.content && j.encoding === 'base64') text = fromB64(j.content);
+        else {
+            const rr = await fetch(apiUrl() + '?ref=' + encodeURIComponent(cfg.branch), { headers: hdr({ Accept: 'application/vnd.github.raw+json' }), cache: 'no-store' });
+            if (!rr.ok) throw new Error('GitHub raw ' + rr.status);
+            text = await rr.text();
+        }
+        return { sha: j.sha, doc: JSON.parse(text) };
+    }
+
+    function applyRemote(rem, reload) {
+        const data = (rem.doc && rem.doc.data) || {};
+        KEYS.forEach(k => {
+            if (!(k in data)) return;
+            let v = data[k];
+            if (k === 'fb_tracked_pages_v12' && cfg.excludeTokens && Array.isArray(v)) {
+                const map = {}; loadJSON(k, []).forEach(p => { map[p.pageId] = p.token; });
+                v = v.map(p => Object.assign({}, p, { token: p.token || map[p.pageId] || '' }));
+            }
+            localStorage.setItem(k, JSON.stringify(v));
+        });
+        meta.sha = rem.sha; meta.dirty = false; meta.lastHash = hashStr(JSON.stringify(snapshot())); saveMeta();
+        setStatus('ok');
+        if (reload) location.reload();
+    }
+
+    async function push(force) {
+        if (!configured() || busy) return;
+        busy = true; setStatus('sync');
+        try {
+            const dataStr = JSON.stringify(snapshot());
+            const hash = hashStr(dataStr);
+            if (!force && hash === meta.lastHash) { meta.dirty = false; saveMeta(); setStatus('ok'); return; }
+            const text = JSON.stringify({ app: 'fcc', updatedAt: Date.now(), data: JSON.parse(dataStr) });
+            const send = sha => {
+                const body = { message: 'sync ' + new Date().toISOString(), content: toB64(text), branch: cfg.branch };
+                if (sha) body.sha = sha;
+                return fetch(apiUrl(), { method: 'PUT', headers: hdr({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+            };
+            let r = await send(meta.sha);
+            if (r.status === 409 || r.status === 422) {
+                const rem = await fetchRemote();
+                if (rem && rem.sha !== meta.sha) {
+                    const keepLocal = confirm('Máy khác vừa cập nhật dữ liệu trên GitHub.\n\nOK = GHI ĐÈ GitHub bằng dữ liệu của máy này.\nCancel = TẢI dữ liệu từ GitHub về (bỏ thay đổi chưa lưu ở máy này).');
+                    if (!keepLocal) { applyRemote(rem, true); return; }
+                }
+                r = await send(rem ? rem.sha : null);
+            }
+            if (!r.ok) throw new Error('GitHub ' + r.status + (r.status === 401 ? ' (token sai/hết hạn)' : r.status === 403 ? ' (thiếu quyền hoặc bị giới hạn)' : r.status === 404 ? ' (không thấy repo/branch)' : ''));
+            const j = await r.json();
+            meta.sha = j.content.sha; meta.dirty = false; meta.lastHash = hash; saveMeta();
+            setStatus('ok');
+        } catch (e) {
+            setStatus('err', 'Lỗi: ' + e.message);
+            toast('Lưu lên GitHub lỗi: ' + e.message, 'error');
+        } finally { busy = false; }
+    }
+
+    // Đối chiếu dữ liệu máy này với GitHub. Trả về true nếu đã nạp dữ liệu từ GitHub.
+    async function reconcile() {
+        const rem = await fetchRemote();
+        if (!rem) { if (hasLocalData()) await push(true); else setStatus('ok'); return false; }
+        const localChanged = meta.dirty || (meta.sha === null && hasLocalData());
+        if (rem.sha === meta.sha) { if (meta.dirty) await push(false); else setStatus('ok'); return false; }
+        if (!localChanged) { applyRemote(rem, false); return true; }
+        const useRemote = confirm('GitHub đã có dữ liệu khác với dữ liệu trên máy này.\n\nOK = DÙNG dữ liệu trên GitHub (thay dữ liệu máy này).\nCancel = GIỮ dữ liệu máy này và ghi đè lên GitHub.');
+        if (useRemote) { applyRemote(rem, false); return true; }
+        meta.sha = rem.sha; saveMeta(); await push(true); return false;
+    }
+
+    function markDirty() {
+        if (!configured()) return;
+        meta.dirty = true; saveMeta(); setStatus('dirty');
+        clearTimeout(pushTimer); pushTimer = setTimeout(() => push(false), 3000);
+    }
+
+    // Bắt mọi lần app lưu dữ liệu để tự đẩy lên GitHub
+    ['saveFoldersToStorage','savePagesToStorage','saveScheduledQueueToStorage','savePostLibraryToStorage','saveFollowerHistoryToStorage','saveCommentTemplatesToStorage'].forEach(n => {
+        const orig = window[n];
+        if (typeof orig !== 'function') return;
+        window[n] = function () { const r = orig.apply(this, arguments); markDirty(); return r; };
+    });
+
+    // Khi mở app: tải dữ liệu từ GitHub trước rồi mới chạy khởi tạo gốc
+    const origOnload = window.onload;
+    window.onload = async function () {
+        if (configured()) {
+            try { setStatus('sync'); await reconcile(); }
+            catch (e) { setStatus('err', 'Lỗi: ' + e.message); toast('Đồng bộ GitHub lỗi: ' + e.message, 'error'); }
+        }
+        if (typeof origOnload === 'function') origOnload.apply(this, arguments);
+        setStatus('ok', configured() ? undefined : STATUS.off[2]);
+        if (!configured()) setStatus('off');
+    };
+
+    // Quay lại tab: kiểm tra máy khác có cập nhật không
+    document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState !== 'visible' || !configured() || busy || meta.dirty) return;
+        try { const rem = await fetchRemote(); if (rem && rem.sha !== meta.sha) { setStatus('behind'); toast('GitHub có dữ liệu mới từ máy khác. Mở ☁ GitHub Sync → "Tải về".', 'warning'); } } catch (e) {}
+    });
+    window.addEventListener('beforeunload', e => { if (meta.dirty && configured()) { e.preventDefault(); e.returnValue = ''; } });
+
+    // ---- Giao diện ----
+    function fillForm() {
+        $('ghs-owner').value = cfg.owner; $('ghs-repo').value = cfg.repo; $('ghs-branch').value = cfg.branch;
+        $('ghs-path').value = cfg.path; $('ghs-token').value = cfg.token; $('ghs-notoken').checked = !!cfg.excludeTokens;
+    }
+    $('ghs-btn').onclick = () => { fillForm(); $('ghs-modal').style.display = 'flex'; };
+    $('ghs-close').onclick = () => { $('ghs-modal').style.display = 'none'; };
+
+    $('ghs-connect').onclick = async () => {
+        const next = {
+            owner: $('ghs-owner').value.trim(), repo: $('ghs-repo').value.trim(),
+            branch: $('ghs-branch').value.trim() || 'main', path: $('ghs-path').value.trim() || 'fcc-data.json',
+            token: $('ghs-token').value.trim(), excludeTokens: $('ghs-notoken').checked
+        };
+        if (!next.owner || !next.repo || !next.token) { toast('Nhập đủ tài khoản, repo và token.', 'warning'); return; }
+        if (next.owner !== cfg.owner || next.repo !== cfg.repo || next.branch !== cfg.branch || next.path !== cfg.path) { meta = { sha: null, dirty: false, lastHash: '' }; saveMeta(); }
+        cfg = next; localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+        try {
+            setStatus('sync');
+            const applied = await reconcile();
+            toast('Đã kết nối GitHub Sync!', 'success');
+            if (applied) location.reload(); else $('ghs-modal').style.display = 'none';
+        } catch (e) { setStatus('err', 'Lỗi: ' + e.message); toast('Kết nối lỗi: ' + e.message, 'error'); }
+    };
+    $('ghs-pull').onclick = async () => {
+        if (!configured()) { toast('Chưa kết nối GitHub.', 'warning'); return; }
+        try {
+            setStatus('sync');
+            const rem = await fetchRemote();
+            if (!rem) { toast('Chưa có file dữ liệu trên GitHub.', 'warning'); setStatus('ok'); return; }
+            if (!confirm('Thay toàn bộ dữ liệu máy này bằng dữ liệu trên GitHub?')) { setStatus(meta.dirty ? 'dirty' : 'ok'); return; }
+            applyRemote(rem, true);
+        } catch (e) { setStatus('err', 'Lỗi: ' + e.message); toast('Tải lỗi: ' + e.message, 'error'); }
+    };
+    $('ghs-push').onclick = async () => {
+        if (!configured()) { toast('Chưa kết nối GitHub.', 'warning'); return; }
+        await push(true);
+        if (meta.dirty === false) toast('Đã đẩy dữ liệu lên GitHub.', 'success');
+    };
+    $('ghs-off').onclick = () => {
+        if (!confirm('Ngắt kết nối GitHub trên máy này? (Dữ liệu trong app vẫn giữ nguyên)')) return;
+        localStorage.removeItem(CFG_KEY); localStorage.removeItem(META_KEY);
+        cfg = { owner: '', repo: '', branch: 'main', path: 'fcc-data.json', token: '', excludeTokens: false };
+        meta = { sha: null, dirty: false, lastHash: '' };
+        fillForm(); setStatus('off'); toast('Đã ngắt kết nối GitHub Sync.', 'info');
+    };
+
+    setStatus(configured() ? 'ok' : 'off');
+})();
+</script>
+
 </body>
 </html>
